@@ -143,6 +143,7 @@ class StateSnapshot(BaseModel):
     proposals: list[ResolutionProposal]
     mcp_call_counts: dict[str, int]
     simulate_coordinate_mismatch: bool
+    mcp_mode: Literal["mock", "live"] = "mock"
 
 
 # --------------------------------------------------------------------------- #

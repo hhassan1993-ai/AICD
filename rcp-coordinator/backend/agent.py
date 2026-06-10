@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 from mcp_client import BASE_SURVEY_POINT, MCPClientProtocol
 from models import (
@@ -65,12 +65,14 @@ class RCPCoordinationAgent:
         on_log: EventSink,
         on_state: StateSink,
         simulate_coordinate_mismatch: bool = False,
+        mcp_mode: Literal["mock", "live"] = "mock",
     ) -> None:
         self._client = client
         self._on_log = on_log
         self._on_state = on_state
         self._lock = asyncio.Lock()
         self._simulate_mismatch = simulate_coordinate_mismatch
+        self._mcp_mode: Literal["mock", "live"] = mcp_mode
 
         self.status: AgentStatus = AgentStatus.IDLE
         self.current_phase: int = 0
@@ -110,6 +112,7 @@ class RCPCoordinationAgent:
             proposals=self.proposals,
             mcp_call_counts=dict(self._client.call_counts),
             simulate_coordinate_mismatch=self._simulate_mismatch,
+            mcp_mode=self._mcp_mode,
         )
 
     async def _log(self, level: str, source: str, message: str) -> None:
