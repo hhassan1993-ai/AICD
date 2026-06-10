@@ -1,0 +1,11 @@
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.6
+
+# Dev / QA
+pytest>=8.0
+mypy>=1.9
+
+# Swap-in for production: replace mcp_client.RevitMCPClient with a real
+# MCP ClientSession (interface-compatible via MCPClientProtocol).
+# mcp>=1.0
