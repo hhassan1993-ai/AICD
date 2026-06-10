@@ -47,8 +47,43 @@ npm run dev
 - **EC1**: tick "Edge Case 1 — simulate survey-point mismatch", press **Reset pipeline**, run Phase 1. MEP model fails at 0.004 m deviation; rail shows phases 2–5 `LOCKED`.
 - **EC2**: run Phases 1–4, **Reject** all proposals, **Submit authorization**, run Phase 5. Terminal header shows `update_loc:0`.
 
+## Live Revit mode (open-source revit-mcp)
+
+By default the backend uses the mocked `RevitMCPClient`. Setting `RCP_MCP_MODE=live`
+swaps in `mcp_live.RevitMCPLiveClient`, which spawns the open-source
+[revit-mcp](https://github.com/revit-mcp/revit-mcp) Node server over stdio (the
+same server Claude Desktop uses) and talks to Revit through the
+`revit-mcp-plugin` socket.
+
+```powershell
+# Prerequisites: Revit open with revit-mcp-plugin enabled, revit-mcp built (npm run build)
+$env:RCP_MCP_MODE = "live"
+$env:REVIT_MCP_ARGS = "C:\path\to\revit-mcp\build\index.js"
+$env:RCP_SHEET_METADATA_FILE = "sheet_metadata.json"   # copy from sheet_metadata.example.json
+py main.py
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RCP_MCP_MODE` | `mock` | `live` connects to revit-mcp |
+| `REVIT_MCP_COMMAND` | `node` | Executable for the MCP server |
+| `REVIT_MCP_ARGS` | — | Path to revit-mcp `build/index.js` (required in live mode) |
+| `RCP_SHEET_METADATA_FILE` | — | JSON backing `read_pdf_dwg_metadata` (2D sheet data lives outside Revit) |
+
+How the orchestrator's five tools map onto revit-mcp (which has no native
+clash/coordinate tools): coordinates, clash scan, element moves, and tagging go
+through revit-mcp's `send_code_to_revit` (C# executed in Revit — snippets in
+`mcp_live.py`, written as reviewable starting points); sheet metadata comes
+from the configured JSON file. The HITL gate is preserved: the live client also
+refuses `update_element_location` without `authorized: true`. Edge Case 1's
+simulated mismatch only applies in mock mode — live mode reads real coordinates.
+
 ## Known scope boundaries
 
-- `RevitMCPClient` is a mock; real Revit integration requires the `mcp` SDK session plus a Revit-side MCP server (interface already aligned via `MCPClientProtocol`).
+- The live clash scan approximates penetration depth from bounding-box overlap —
+  verify the C# snippets in `mcp_live.py` against your model conventions before
+  trusting results.
+- `create_tag_and_dimension` places tags only in live mode; dimensions need
+  project-specific references.
 - Single-process, in-memory state per the execution parameters; restart clears all state.
 - No authentication on the API — local development build only.

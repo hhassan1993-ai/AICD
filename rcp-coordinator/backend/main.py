@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections import deque
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
@@ -24,7 +25,7 @@ from agent import (
     RCPCoordinationAgent,
     StateError,
 )
-from mcp_client import RevitMCPClient
+from mcp_client import MCPClientProtocol, RevitMCPClient
 from models import (
     AuthorizationRequest,
     LogEvent,
@@ -37,6 +38,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 LOG_BUFFER_SIZE = 500
 
+# "mock" (default) uses the simulated RevitMCPClient; "live" connects to the
+# open-source revit-mcp Node server over stdio (see mcp_live.py for config).
+MCP_MODE = os.environ.get("RCP_MCP_MODE", "mock").strip().lower()
+
 
 class Hub:
     """In-memory state container + WebSocket fan-out."""
@@ -44,11 +49,27 @@ class Hub:
     def __init__(self) -> None:
         self.clients: set[WebSocket] = set()
         self.log_buffer: deque[LogEvent] = deque(maxlen=LOG_BUFFER_SIZE)
+        # In live mode a single MCP session (and its spawned revit-mcp child
+        # process) is shared across resets; only its call counters reset.
+        self._live_client: Any = None
+        if MCP_MODE == "live":
+            from mcp_live import RevitMCPLiveClient
+
+            self._live_client = RevitMCPLiveClient.from_env()
+            logger.info("MCP mode: live (revit-mcp over stdio)")
+        else:
+            logger.info("MCP mode: mock")
         self.agent: RCPCoordinationAgent = self._build_agent(simulate_mismatch=False)
         self._send_lock = asyncio.Lock()
 
+    def _build_client(self, *, simulate_mismatch: bool) -> MCPClientProtocol:
+        if self._live_client is not None:
+            self._live_client.reset_counts()
+            return self._live_client  # type: ignore[no-any-return]
+        return RevitMCPClient(simulate_coordinate_mismatch=simulate_mismatch)
+
     def _build_agent(self, *, simulate_mismatch: bool) -> RCPCoordinationAgent:
-        client = RevitMCPClient(simulate_coordinate_mismatch=simulate_mismatch)
+        client = self._build_client(simulate_mismatch=simulate_mismatch)
         return RCPCoordinationAgent(
             client,
             on_log=self.broadcast_log,
@@ -56,9 +77,24 @@ class Hub:
             simulate_coordinate_mismatch=simulate_mismatch,
         )
 
+    async def shutdown(self) -> None:
+        if self._live_client is not None:
+            await self._live_client.aclose()
+
     async def reset(self, *, simulate_mismatch: bool) -> None:
         self.log_buffer.clear()
         self.agent = self._build_agent(simulate_mismatch=simulate_mismatch)
+        if simulate_mismatch and self._live_client is not None:
+            await self.broadcast_log(
+                LogEvent(
+                    level="warn",
+                    source="ORCH",
+                    message=(
+                        "Edge Case 1 simulation has no effect in live MCP mode — "
+                        "coordinates are read from the real model"
+                    ),
+                )
+            )
         await self.broadcast_log(
             LogEvent(
                 level="info",
@@ -98,7 +134,10 @@ hub = Hub()
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("RCP Coordination Orchestrator started (in-memory state)")
-    yield
+    try:
+        yield
+    finally:
+        await hub.shutdown()
 
 
 app = FastAPI(title="RCP Coordination Orchestrator", version="1.0.0", lifespan=lifespan)

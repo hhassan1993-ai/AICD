@@ -1,11 +1,10 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2.6
+# Live mode: mcp_live.RevitMCPLiveClient connects to the open-source
+# revit-mcp Node server over stdio (set RCP_MCP_MODE=live).
+mcp>=1.0
 
 # Dev / QA
 pytest>=8.0
 mypy>=1.9
-
-# Swap-in for production: replace mcp_client.RevitMCPClient with a real
-# MCP ClientSession (interface-compatible via MCPClientProtocol).
-# mcp>=1.0
