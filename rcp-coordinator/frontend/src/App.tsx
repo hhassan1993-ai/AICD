@@ -33,7 +33,7 @@ export default function App(): JSX.Element {
           <p className="text-[9px] uppercase tracking-[0.2em] text-dim">Units</p>
           <p className="text-[12px] text-ink">ISO — metres (0.000)</p>
         </div>
-        <div className="col-span-2 flex items-center gap-2 px-3 py-2 md:col-span-1">
+        <div className="col-span-2 flex items-center gap-3 px-3 py-2 md:col-span-1">
           {connection === "open" ? (
             <span className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-ok">
               <PlugZap size={13} aria-hidden /> Orchestrator linked
@@ -42,6 +42,22 @@ export default function App(): JSX.Element {
             <span className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-halt">
               <Plug size={13} aria-hidden />
               {connection === "connecting" ? "Connecting…" : "Reconnecting…"}
+            </span>
+          )}
+          {state !== null && (
+            <span
+              title={
+                state.mcp_mode === "live"
+                  ? "Connected to Revit via the revit-mcp server — writes affect the model"
+                  : "Simulated Revit MCP client — no model is touched"
+              }
+              className={
+                state.mcp_mode === "live"
+                  ? "border border-ok/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-ok"
+                  : "border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-dim"
+              }
+            >
+              MCP: {state.mcp_mode}
             </span>
           )}
         </div>

@@ -75,6 +75,7 @@ class Hub:
             on_log=self.broadcast_log,
             on_state=self.broadcast_state,
             simulate_coordinate_mismatch=simulate_mismatch,
+            mcp_mode="live" if self._live_client is not None else "mock",
         )
 
     async def shutdown(self) -> None:

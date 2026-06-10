@@ -90,6 +90,8 @@ export const StateSnapshotSchema = z.object({
   proposals: z.array(ResolutionProposalSchema),
   mcp_call_counts: z.record(z.string(), z.number().int().nonnegative()),
   simulate_coordinate_mismatch: z.boolean(),
+  // Tolerate older backends that don't send the field yet.
+  mcp_mode: z.enum(["mock", "live"]).default("mock"),
 });
 export type StateSnapshot = z.infer<typeof StateSnapshotSchema>;
 
