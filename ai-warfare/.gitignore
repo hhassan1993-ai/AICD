@@ -1,0 +1,14 @@
+server/artifact/
+server/data/
+server/cache/
+logs/
+*.log
+resources/[mission]/mission-core/coords_dump.json
+server/server.cfg.local
+# Standard cfx-server-data resources copied in by scripts/get-server.ps1 (not ours)
+resources/mapmanager/
+resources/chat/
+resources/spawnmanager/
+resources/sessionmanager/
+resources/basic-gamemode/
+resources/hardcap/
