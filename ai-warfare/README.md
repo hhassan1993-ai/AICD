@@ -4,10 +4,10 @@ Self-hosted FXServer infrastructure for the AI-army mission engine described
 in Launch Plan v2.0 §3, milestones **M1** (autonomous AI squads with
 ownership-migration handled via OneSync entity state bags) and **M2**
 (server-issued orders — move / attack-move / hold / retreat — driven by
-admin chat commands). This repo holds the server config, setup/launch
-scripts, and test docs; the Lua resources themselves live under
-`resources/[mission]/` and are maintained separately (see
-`docs/ENGINE-SPEC.md`).
+admin chat commands). This directory holds the server config, setup/launch
+scripts, test docs, and the Lua resources under `resources/[mission]/`
+(design in `docs/ENGINE-SPEC.md`; product context in
+`docs/LAUNCH-PLAN-v2.md`).
 
 ## Windows quick start
 
@@ -25,8 +25,8 @@ scripts, and test docs; the Lua resources themselves live under
 
 FXServer only scans **one** `resources/` folder, relative to its working
 directory. This repo keeps that folder at the **repo root**
-(`ai-warfare/resources/`), containing both `resources/[mission]/` (the Lua
-worker's resources, never modified by anything here) and the standard
+(`ai-warfare/resources/`), containing both `resources/[mission]/` (our
+resources, version-controlled) and the standard
 cfx-server-data resources (`mapmanager`, `chat`, `spawnmanager`,
 `sessionmanager`, `basic-gamemode`, `hardcap`), which `get-server.ps1`
 copies in from the `server/data/` clone. FXServer is launched with its
@@ -85,7 +85,7 @@ grant yourself admin with `add_principal identifier.fivem:<you> group.admin`.
 | `get-server.ps1` download/extract/clone flow | Unverified — never executed (Windows + network required) |
 | `server/server.cfg` values and `ensure` order | Unverified against a running FXServer |
 | `restart-and-check.ps1` / `.sh` process start/stop, log capture, grep logic | Unverified — never run against a real `FXServer.exe` / `run.sh` |
-| Mission resource logic (`mission-core`, `mission-ai`, `population-ctl`) | Owned by a different worker; out of scope here |
+| Mission resource logic (`mission-core`, `mission-ai`, `population-ctl`) | Reviewed for native signatures; runtime behaviour unverified (natives tagged `-- VERIFY:` need in-game confirmation) |
 | T1 / T2 pass/fail outcomes | Unverified — require the actual PC, client, and game session |
 
 Everything above "unverified" must be exercised on the owner's Windows PC
