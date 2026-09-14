@@ -54,7 +54,8 @@ Config.FormationOffset = 2.5  -- metres between squad members (line abreast, slo
 
 State: `units[netId] = { ped=entity, f='A', sq=1, slot=n, order={...}, seq=n }`, `squads[f][sq] = {netIds}`.
 
-Natives (server-side, OneSync): `CreatePed(model, x, y, z, heading, true, true)`, `GiveWeaponToPed`,
+Natives (server-side, OneSync): `CreatePed(pedType, model, x, y, z, heading, true, true)` (server-side
+CREATE_PED takes a leading `pedType`; 4 = CIVMALE), `GiveWeaponToPed`,
 `SetPedArmour`, `NetworkGetNetworkIdFromEntity`, `NetworkGetEntityOwner`, `DoesEntityExist`,
 `GetEntityCoords`, `DeleteEntity`, `Entity(e).state`.
 
