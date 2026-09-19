@@ -204,3 +204,52 @@ console** and never messages the client, so none of the above is visible
 in-game or in the F8 client console. Use `scripts\run-server-console.cmd`;
 `restart-and-check.ps1` redirects stdout to a block-buffered file that does not
 flush until the server exits, so it cannot be used to watch a live session.
+
+---
+
+## Resolution (2026-09-19, commit `595201c`)
+
+Fixed in `mission-core/server.lua`, `mission-shared/config.lua`, and the offline
+harness. All three suggested directions were taken.
+
+Before fixing anything, the harness was corrected to model reality: a
+server-created ped now starts un-instantiated, reading health 0 and absent from
+the ped pool, with a switch controlling whether `DoesEntityExist` is true or
+false beforehand. Against the unfixed code this **reproduced the production
+console output byte-for-byte**, five `removed from registry: dead or missing at
+order time` lines followed by `0 squad(s), 0 unit(s)`. Seven pre-existing tests
+went red at the same time, which is the measure of how wrong the mock had been.
+
+| Change | Where |
+|---|---|
+| Initial `hold` publishes without any liveness gate | `publishOrder`, split out of `setUnitOrder` |
+| A unit is culled for being dead only once seen alive | `setUnitOrder`, and the audit's health branch |
+| Non-existence culls only past the grace window | audit |
+| `Config.SpawnGraceMs` (15000) then reaps, via the corpse path, logging that no client ever instantiated it | config + audit |
+| Audit retries a missing order (`u.order == nil`) | audit |
+| `mo_status` lists empty buckets and prints totals; per-unit "waiting for a client to instantiate it" | `forEachSquad(fn, includeEmpty)` |
+| Spawn counts created / registered / ordered / alive separately | `spawnSquad` |
+
+Tests 15 to 20 cover it. Reverting the `seenAlive` gate turns 15 and 18 red;
+reverting the audit guard turns 16 and 17 red; reverting the grace window,
+the empty-bucket listing, the spawn counter and the self-heal each turn one
+red. One honest gap: with the `seenAlive` gate in place, removing the
+gate-free initial publish alone reddens nothing. It is kept as redundant
+defence because ordering a ped in its creation frame should never consult
+liveness in the first place.
+
+### Still assumed, not proven — check these on the next live run
+
+The fix rests on four claims about real FiveM that no data here settles. Each
+would show up differently in the console, so they are worth knowing before the
+next session.
+
+| Assumption | How it would fail visibly |
+|---|---|
+| A non-zero `CreatePed` handle means success even when `DoesEntityExist` is false | `CreatePed failed` warnings at spawn |
+| `NetworkGetNetworkIdFromEntity` returns a usable id before instantiation | `no network id for freshly created ped` warnings, peds deleted at spawn |
+| A state-bag write succeeds on a not-yet-instantiated entity | `state bag write failed`, then `re-applied hold` from the audit a second later; harmless if the retry lands |
+| 15000 ms is a safe upper bound for a client to scope in | units culled with `never became alive within 15000 ms`; raise `Config.SpawnGraceMs` |
+
+The third is already self-healing by design. The second is the one that would
+still block M1, and it would be obvious in the spawn output.
