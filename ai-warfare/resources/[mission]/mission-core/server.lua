@@ -63,6 +63,13 @@ local seqCounter  = 0
 --- Peds created by /test_pool (outside the squad registry); cleared by clearAll().
 local poolPeds = {}
 
+--- Bodies of units the audit has evicted from `units`, awaiting deletion:
+--- { { ped = entity, ticks = <audit passes remaining> }, ... }
+--- Without this a killed ped is unreachable by every code path here — it is
+--- gone from `units`, so neither the audit nor clearAll() can ever delete it,
+--- and it holds a ped-pool slot until the server restarts.
+local corpses = {}
+
 -- ---------------------------------------------------------------------------
 -- Argument validation
 -- ---------------------------------------------------------------------------
@@ -105,10 +112,23 @@ local function entityAlive(ped)
     return GetEntityHealth(ped) > 0
 end
 
+--- Audit passes a body waits before deletion, from Config.CorpseLingerMs.
+local function corpseTicks()
+    local interval = tonumber(Config.Tick and Config.Tick.serverAuditMs) or 1000
+    if interval < 100 then interval = 100 end
+    local linger = tonumber(Config.CorpseLingerMs) or 0
+    if linger <= 0 then return 0 end
+    return math.ceil(linger / interval)
+end
+
 local function forgetUnit(netId, reason)
     local u = units[netId]
     if not u then return end
     units[netId] = nil
+    -- Keep the body reachable so it is still deleted later (or by /mo_clear).
+    if type(u.ped) == 'number' and u.ped ~= 0 and DoesEntityExist(u.ped) then
+        corpses[#corpses + 1] = { ped = u.ped, ticks = corpseTicks() }
+    end
     local bucket = squads[u.f] and squads[u.f][u.sq]
     if bucket then
         for i = #bucket, 1, -1 do
@@ -271,6 +291,14 @@ local function clearAll()
             removed = removed + 1
         end
         units[netId] = nil
+    end
+    for i = #corpses, 1, -1 do
+        local ped = corpses[i].ped
+        if type(ped) == 'number' and ped ~= 0 and DoesEntityExist(ped) then
+            DeleteEntity(ped)
+            removed = removed + 1
+        end
+        corpses[i] = nil
     end
     for i = #poolPeds, 1, -1 do
         local ped = poolPeds[i]
@@ -530,6 +558,19 @@ Citizen.CreateThread(function()
 
         for i = 1, #stale do
             forgetUnit(stale[i][1], stale[i][2])
+        end
+
+        -- Reap bodies whose linger time has elapsed.
+        for i = #corpses, 1, -1 do
+            local c = corpses[i]
+            if type(c.ped) ~= 'number' or c.ped == 0 or not DoesEntityExist(c.ped) then
+                table.remove(corpses, i)
+            elseif c.ticks <= 0 then
+                DeleteEntity(c.ped)
+                table.remove(corpses, i)
+            else
+                c.ticks = c.ticks - 1
+            end
         end
     end
 end)

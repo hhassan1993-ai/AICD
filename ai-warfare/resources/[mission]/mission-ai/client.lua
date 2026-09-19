@@ -249,6 +249,9 @@ local function apply(ped, netId, st)
     if t == 'hold' then
         restoreCombat(ped, netId)
         ClearPedTasks(ped)
+        -- ENGINE-SPEC §5.4 hold: engage anything already hated inside the
+        -- engagement radius, THEN stand guard.
+        TaskCombatHatedTargetsAroundPed(ped, engageRadius(), 0)
         -- Guard with scanForNewEvents=true: the ped engages hated groups that
         -- enter its awareness on its own (relationship HATE + BF_AlwaysFight).
         TaskGuardCurrentPosition(ped, 15.0, 15.0, true)

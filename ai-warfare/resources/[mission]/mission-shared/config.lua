@@ -36,6 +36,13 @@ Config.Tick = {
     serverAuditMs = 1000,
 }
 
+-- How long a killed ped's body stays in the world before the server deletes it.
+-- Bodies are spectacle (the caster pans over them), but every corpse still
+-- occupies a ped-pool slot, which is the scarce resource measured by the T2
+-- test — so they cannot be kept forever in a 45-90 min match. 0 deletes on the
+-- next audit pass; raise it if the footage needs longer-lived casualties.
+Config.CorpseLingerMs = 60000
+
 -- PLACEHOLDER coordinates (unverified). Replace with /coords dumper output before first session.
 Config.Spawns = {
     A = vector4(1700.0, 3250.0, 41.0, 200.0),

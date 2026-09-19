@@ -69,6 +69,13 @@ Commands (all `RegisterCommand(name, fn, true)` restricted; add `add_ace group.a
 
 Ownership audit (every `serverAuditMs`): for each unit, drop dead/missing (`DoesEntityExist` false or `GetEntityHealth<=0` → remove from registry, log). Log owner changes: `[T1] unit <netId> owner <old> -> <new>`.
 
+Corpse lifecycle: a unit evicted from `units` moves to a `corpses` list rather than
+being forgotten, because a body that is in neither list is unreachable by every
+code path and holds a ped-pool slot until restart — the exact resource the T2 test
+measures. The audit deletes each body once `Config.CorpseLingerMs` has elapsed, and
+`/mo_clear` deletes them immediately. Linger is a content knob: bodies are spectacle
+for the caster, pool slots are the budget.
+
 ## 5. mission-ai (client)
 
 On resource start and every 500 ms:
@@ -92,5 +99,20 @@ Once: `SetGarbageTrucks(false)`, `SetRandomBoats(false)`, `SetCreateRandomCops(f
 - `/test_pool <n>` (server): spawns `n` peds of faction A at spawn in a grid, prints server-side count every 10 s — T2 measurement helper. Caster records client FPS and `resmon`.
 
 ## 8. Validation without a game client (this container)
-`luac5.4 -p` on every `.lua`; `scripts/lint-lua.sh` wraps it. Runtime validation happens on the
-self-hosted FXServer via `scripts/restart-and-check.ps1` (§3.5 loop).
+
+Two layers, both runnable with no FXServer and no GTA client:
+
+1. `scripts/lint-lua.sh` — `luac5.4 -p` on every `.lua`. Syntax only.
+2. `scripts/test-lua.sh` — the offline runtime suite in `tests/`. `tests/fivem_mock.lua`
+   mocks the natives (virtual clock and scheduler, a ped world, shared state bags, a
+   call recorder) and `tests/run_tests.lua` executes `mission-core/server.lua` plus two
+   independent `mission-ai/client.lua` environments over one shared world, so ownership
+   migration is genuinely exercised. An unmocked native raises `unimplemented native: <NAME>`
+   rather than returning nil, so gaps surface instead of hiding.
+
+What the harness cannot decide, and what therefore still needs the real server: every
+value tagged `-- VERIFY:` (combat attribute ids, ability/range/movement enums, dispatch
+service ids, the audio-flag string), whether server-side `CREATE_PED` really takes a
+leading `pedType`, real OneSync migration timing, pathing and geometry, ACE enforcement,
+and all T2 performance numbers. Runtime validation against a real server happens via
+`scripts/restart-and-check.ps1` (§3.5 loop).

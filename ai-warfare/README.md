@@ -43,6 +43,17 @@ file without ever writing the real key to disk. See the header comments in
 `server/server.cfg` and `scripts/restart-and-check.ps1` for the same
 rationale in more detail.
 
+## Checks you can run without a server
+
+```bash
+bash scripts/lint-lua.sh    # luac5.4 -p on every resource file
+bash scripts/test-lua.sh    # 14-test offline runtime suite (mocked natives)
+```
+
+Run both before every push. The suite executes the real resource code against
+`tests/fivem_mock.lua`, with two simulated clients over one shared world, so an
+ownership-migration regression fails the build rather than surfacing mid-session.
+
 ## Command reference (ENGINE-SPEC.md §4, §7)
 
 | Command | Side | Description |
@@ -87,11 +98,13 @@ grant yourself admin with `add_principal identifier.fivem:<you> group.admin`.
 | Item | Status |
 |---|---|
 | Lua syntax of every `.lua` under `resources/` (`luac5.4 -p`, `scripts/lint-lua.sh`) | **Verified** in this container |
+| Runtime behaviour against mocked natives — spawn, orders, ownership migration, death and corpse cleanup, argument validation, coord dumping, population suppression (`scripts/test-lua.sh`, 14 tests) | **Verified** in this container, against the mock only |
+| Every value tagged `-- VERIFY:` in the resource Lua (combat attribute ids, ability/range/movement enums, dispatch ids, audio flag), and whether server-side `CREATE_PED` takes a leading `pedType` | Unverified — needs the real server |
 | `runtime.fivem.net` artifact-listing HTML structure that `get-server.ps1` parses | Unverified — container has no network path to `runtime.fivem.net` |
 | `get-server.ps1` download/extract/clone flow | Unverified — never executed (Windows + network required) |
 | `server/server.cfg` values and `ensure` order | Unverified against a running FXServer |
 | `restart-and-check.ps1` / `.sh` process start/stop, log capture, grep logic | Unverified — never run against a real `FXServer.exe` / `run.sh` |
-| Mission resource logic (`mission-core`, `mission-ai`, `population-ctl`) | Reviewed for native signatures; runtime behaviour unverified (natives tagged `-- VERIFY:` need in-game confirmation) |
+| Real OneSync migration timing, ped pathing and geometry, combat outcomes, ACE enforcement | Unverified — needs the real server |
 | T1 / T2 pass/fail outcomes | Unverified — require the actual PC, client, and game session |
 
 Everything above "unverified" must be exercised on the owner's Windows PC
