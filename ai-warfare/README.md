@@ -11,6 +11,28 @@ scripts, test docs, and the Lua resources under `resources/[mission]/`
 
 ## Windows quick start
 
+### Fastest path
+
+One paste, in an elevated or normal PowerShell prompt, handles execution
+policy, missing 7-Zip/git, and the license key in one go:
+
+```
+powershell -ExecutionPolicy Bypass -File .\ai-warfare\scripts\bootstrap.ps1 -LicenseKey cfxk_YOURKEYHERE -InstallPrereqs
+```
+
+Passing the key as an argument leaves it in shell history and the process
+list, so creating `server/license.key` by hand (see step 2 below) and
+omitting `-LicenseKey` is the tidier option. Drop `-InstallPrereqs` if you'd
+rather install missing tools yourself — `bootstrap.ps1` will tell you the
+exact command. Add `-KeepRunning` to leave the server up afterwards so you
+can connect a client. See `scripts/bootstrap.ps1` for the full parameter
+list (`-ArtifactUrl`, `-Seconds`, `-SkipGetServer`, `-Force`).
+
+The manual step-by-step below still works and is useful for re-running one
+stage on its own.
+
+### Manual steps
+
 1. `.\scripts\get-server.ps1` — downloads the latest recommended FXServer
    Windows artifact into `server/artifact/` and clones `cfx-server-data`
    into `server/data/`, copying the standard resource set into `resources/`.
