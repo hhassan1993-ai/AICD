@@ -32,6 +32,12 @@
     Extra regex (in addition to the built-in error patterns) to also flag
     as a failure line.
 
+.PARAMETER LicenseKey
+    FiveM license key. If omitted, resolved in this order: the
+    FIVEM_LICENSE_KEY environment variable, then the first non-empty,
+    non-comment line of server\license.key (gitignored; see
+    server\license.key.example).
+
 .NOTES
     PowerShell 5.1 compatible. This script has NOT been run against a real
     FXServer.exe in this environment (no network access to runtime.fivem.net
@@ -42,7 +48,8 @@
 param(
     [int]$Seconds = 45,
     [switch]$KeepRunning,
-    [string]$Filter
+    [string]$Filter,
+    [string]$LicenseKey
 )
 
 Set-StrictMode -Version Latest
@@ -66,9 +73,30 @@ try {
         throw "FXServer.exe not found at $FxServerExe. Run scripts\get-server.ps1 first."
     }
 
-    if (-not $env:FIVEM_LICENSE_KEY -or $env:FIVEM_LICENSE_KEY -eq '') {
-        throw "Environment variable FIVEM_LICENSE_KEY is not set. Get a free key at https://portal.cfx.re and run: `$env:FIVEM_LICENSE_KEY = '<key>'"
+    $licenseKeyValue = $null
+    $licenseKeySource = $null
+    $licenseKeyFile = Join-Path $RepoRoot 'server\license.key'
+
+    if ($LicenseKey) {
+        $licenseKeyValue = $LicenseKey
+        $licenseKeySource = '-LicenseKey argument'
+    } elseif ($env:FIVEM_LICENSE_KEY) {
+        $licenseKeyValue = $env:FIVEM_LICENSE_KEY
+        $licenseKeySource = 'FIVEM_LICENSE_KEY environment variable'
+    } elseif (Test-Path $licenseKeyFile) {
+        $fileLine = Get-Content -Path $licenseKeyFile -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') } | Select-Object -First 1
+        if ($fileLine) {
+            $licenseKeyValue = $fileLine
+            $licenseKeySource = 'server\license.key'
+        }
     }
+
+    if (-not $licenseKeyValue) {
+        throw "No FiveM license key found. Provide one via -LicenseKey <key>, the FIVEM_LICENSE_KEY environment variable, or by creating server\license.key (see server\license.key.example; the file is gitignored and never committed). Get a free key at https://portal.cfx.re"
+    }
+
+    $keyPrefix = $licenseKeyValue.Substring(0, [Math]::Min(5, $licenseKeyValue.Length))
+    Write-Host "license key: loaded from $licenseKeySource ($keyPrefix…, $($licenseKeyValue.Length) chars)"
 
     New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -78,7 +106,7 @@ try {
 
     $argList = @(
         '+set', 'citizen_dir', "`"$CitizenDir`"",
-        '+set', 'sv_licenseKey', $env:FIVEM_LICENSE_KEY,
+        '+set', 'sv_licenseKey', $licenseKeyValue,
         '+exec', 'server/server.cfg'
     )
 

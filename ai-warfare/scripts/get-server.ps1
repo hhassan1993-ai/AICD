@@ -210,7 +210,9 @@ try {
     Write-Host "Done." -ForegroundColor Green
     Write-Host "Artifact: $ArtifactDir"
     Write-Host "Data:     $DataDir"
-    Write-Host "Next: set `$env:FIVEM_LICENSE_KEY, then run scripts\restart-and-check.ps1"
+    Write-Host "Next: provide a license key, then run scripts\restart-and-check.ps1"
+    Write-Host "      either set `$env:FIVEM_LICENSE_KEY = '<key>'"
+    Write-Host "      or create server\license.key containing just the key (gitignored)"
     exit 0
 } catch {
     Write-Host ""

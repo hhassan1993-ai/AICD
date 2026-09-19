@@ -14,8 +14,14 @@ scripts, test docs, and the Lua resources under `resources/[mission]/`
 1. `.\scripts\get-server.ps1` — downloads the latest recommended FXServer
    Windows artifact into `server/artifact/` and clones `cfx-server-data`
    into `server/data/`, copying the standard resource set into `resources/`.
-2. `$env:FIVEM_LICENSE_KEY = "<your key>"` — get a free key at
-   [portal.cfx.re](https://portal.cfx.re) (Keymaster). Never commit it.
+2. Provide a license key — get a free one at
+   [portal.cfx.re](https://portal.cfx.re) (Keymaster). Either:
+   - `$env:FIVEM_LICENSE_KEY = "<your key>"` (per shell session), or
+   - create `server/license.key` with just the key on the first line
+     (persists across shells; see `server/license.key.example`).
+
+   `server/license.key` is gitignored and must **never** be committed. If a
+   key leaks, revoke and reissue it in the Keymaster portal.
 3. `.\scripts\restart-and-check.ps1` — starts FXServer for 45s (default),
    captures the log, greps it for error signatures, prints PASS/FAIL.
 4. Open the FiveM client and connect to `127.0.0.1:30120`.

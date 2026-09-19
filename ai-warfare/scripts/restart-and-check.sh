@@ -12,13 +12,18 @@
 # setup step — this repo's get-server.ps1 targets Windows only, per spec).
 #
 # Usage:
-#   ./restart-and-check.sh [-s SECONDS] [-k] [-f EXTRA_REGEX]
-#     -s SECONDS   how long to let the server run before stopping (default 45)
-#     -k           keep running (don't kill the server after the window)
-#     -f REGEX     extra case-insensitive regex to also flag as failure
+#   ./restart-and-check.sh [-s SECONDS] [-k] [-f EXTRA_REGEX] [--license-key KEY | -l KEY]
+#     -s SECONDS         how long to let the server run before stopping (default 45)
+#     -k                 keep running (don't kill the server after the window)
+#     -f REGEX           extra case-insensitive regex to also flag as failure
+#     -l, --license-key  FIVEM license key (see precedence below)
 #
-# Requires: FIVEM_LICENSE_KEY environment variable set, and
-# server/artifact/run.sh present (the Linux FXServer artifact + its
+# Requires a license key, resolved in this order:
+#   1. the --license-key / -l argument
+#   2. the FIVEM_LICENSE_KEY environment variable
+#   3. the first non-empty, non-comment line of server/license.key (gitignored;
+#      see server/license.key.example)
+# and server/artifact/run.sh present (the Linux FXServer artifact + its
 # alongside "run.sh" launcher, extracted the same way get-server.ps1 does
 # for Windows — NOT produced by any script in this repo, since this repo's
 # get-server.ps1 is Windows-only per the deliverable spec).
@@ -32,11 +37,43 @@ set -euo pipefail
 SECONDS_TO_RUN=45
 KEEP_RUNNING=0
 EXTRA_FILTER=""
+LICENSE_KEY_ARG=""
 
 usage() {
-    echo "Usage: $0 [-s SECONDS] [-k] [-f EXTRA_REGEX]" >&2
+    echo "Usage: $0 [-s SECONDS] [-k] [-f EXTRA_REGEX] [--license-key KEY | -l KEY]" >&2
     exit 1
 }
+
+# Pull --license-key/-l out first (getopts below doesn't understand long
+# options), leaving everything else for getopts to parse as before.
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --license-key)
+            [ $# -ge 2 ] || { echo "FAILED: --license-key requires a value" >&2; exit 1; }
+            LICENSE_KEY_ARG="$2"
+            shift 2
+            ;;
+        --license-key=*)
+            LICENSE_KEY_ARG="${1#--license-key=}"
+            shift
+            ;;
+        -l)
+            [ $# -ge 2 ] || { echo "FAILED: -l requires a value" >&2; exit 1; }
+            LICENSE_KEY_ARG="$2"
+            shift 2
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+if [ ${#ARGS[@]} -gt 0 ]; then
+    set -- "${ARGS[@]}"
+else
+    set --
+fi
 
 while getopts "s:kf:h" opt; do
     case "$opt" in
@@ -66,10 +103,48 @@ if [ ! -x "$RUN_SH" ] && [ ! -f "$RUN_SH" ]; then
     exit 1
 fi
 
-if [ -z "${FIVEM_LICENSE_KEY:-}" ]; then
-    echo "FAILED: environment variable FIVEM_LICENSE_KEY is not set. Get a free key at https://portal.cfx.re and: export FIVEM_LICENSE_KEY=<key>" >&2
+# Reads the first non-empty, non-comment line of a file, trimmed of
+# surrounding whitespace, and prints it. Returns 1 if the file doesn't
+# exist or has no such line.
+read_license_from_file() {
+    local file="$1"
+    local line trimmed
+    [ -f "$file" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        trimmed="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        case "$trimmed" in
+            ''|'#'*) continue ;;
+            *)
+                printf '%s' "$trimmed"
+                return 0
+                ;;
+        esac
+    done <"$file"
+    return 1
+}
+
+LICENSE_KEY=""
+LICENSE_SOURCE=""
+LICENSE_FILE="$REPO_ROOT/server/license.key"
+
+if [ -n "$LICENSE_KEY_ARG" ]; then
+    LICENSE_KEY="$LICENSE_KEY_ARG"
+    LICENSE_SOURCE="--license-key argument"
+elif [ -n "${FIVEM_LICENSE_KEY:-}" ]; then
+    LICENSE_KEY="$FIVEM_LICENSE_KEY"
+    LICENSE_SOURCE="FIVEM_LICENSE_KEY environment variable"
+elif LICENSE_KEY="$(read_license_from_file "$LICENSE_FILE")"; then
+    LICENSE_SOURCE="server/license.key"
+fi
+
+if [ -z "$LICENSE_KEY" ]; then
+    echo "FAILED: no FiveM license key found. Provide one via --license-key <key>, the FIVEM_LICENSE_KEY environment variable, or by creating server/license.key (see server/license.key.example; the file is gitignored and never committed). Get a free key at https://portal.cfx.re" >&2
     exit 1
 fi
+
+KEY_LEN=${#LICENSE_KEY}
+KEY_PREFIX="${LICENSE_KEY:0:5}"
+echo "license key: loaded from $LICENSE_SOURCE (${KEY_PREFIX}…, ${KEY_LEN} chars)"
 
 mkdir -p "$LOGS_DIR"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
@@ -83,7 +158,7 @@ echo "    Log: $LOG_PATH"
     cd "$REPO_ROOT"
     exec "$RUN_SH" \
         +set citizen_dir "$ARTIFACT_DIR/citizen" \
-        +set sv_licenseKey "$FIVEM_LICENSE_KEY" \
+        +set sv_licenseKey "$LICENSE_KEY" \
         +exec server/server.cfg
 ) >"$LOG_PATH" 2>&1 &
 SERVER_PID=$!
