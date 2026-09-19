@@ -156,10 +156,12 @@ echo "    Log: $LOG_PATH"
 
 (
     cd "$REPO_ROOT"
+    # Key last; server.cfg does not set sv_licenseKey. Same order as the
+    # Windows launchers.
     exec "$RUN_SH" \
         +set citizen_dir "$ARTIFACT_DIR/citizen" \
-        +set sv_licenseKey "$LICENSE_KEY" \
-        +exec server/server.cfg
+        +exec server/server.cfg \
+        +set sv_licenseKey "$LICENSE_KEY"
 ) >"$LOG_PATH" 2>&1 &
 SERVER_PID=$!
 

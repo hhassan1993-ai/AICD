@@ -14,12 +14,12 @@
 
     Command line used:
         FXServer.exe +set citizen_dir "<repo>\server\artifact\citizen"
-                      +set sv_licenseKey <FIVEM_LICENSE_KEY>
                       +exec server/server.cfg
+                      +set sv_licenseKey <resolved key>
 
-    sv_licenseKey is passed on the command line AFTER +exec so it overrides
-    the "CHANGEME" placeholder baked into server.cfg, without ever writing
-    the real key to disk.
+    sv_licenseKey is passed on the command line, never written to disk.
+    server.cfg deliberately does not set it, so the command line is the only
+    source for that convar.
 
 .PARAMETER Seconds
     How long to let the server run before stopping it. Default 45.
@@ -104,10 +104,12 @@ try {
     $stdoutPath = "$logPath.stdout.tmp"
     $stderrPath = "$logPath.stderr.tmp"
 
+    # Key last: server.cfg deliberately does not set sv_licenseKey, so there is
+    # nothing to race, and every launcher in scripts/ builds the same order.
     $argList = @(
         '+set', 'citizen_dir', "`"$CitizenDir`"",
-        '+set', 'sv_licenseKey', $licenseKeyValue,
-        '+exec', 'server/server.cfg'
+        '+exec', 'server/server.cfg',
+        '+set', 'sv_licenseKey', $licenseKeyValue
     )
 
     Write-Host "==> Starting FXServer for $Seconds second(s)..." -ForegroundColor Cyan

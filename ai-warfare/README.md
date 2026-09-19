@@ -46,6 +46,16 @@ stage on its own.
    key leaks, revoke and reissue it in the Keymaster portal.
 3. `.\scripts\restart-and-check.ps1` — starts FXServer for 45s (default),
    captures the log, greps it for error signatures, prints PASS/FAIL.
+
+   **This is a load-time smoke test only.** It proves the resources started
+   without errors; it cannot see gameplay failures. The mission code reports
+   through Lua `print()` at info level to the server console — never to the
+   client — so a unit-spawning or combat failure produces no `error`-level
+   line and PASS can print with the mission silently broken. Its log file is
+   also block-buffered and only flushes when the server exits, so it cannot
+   be tailed to watch a session live either. For anything interactive or
+   diagnostic — watching output as it happens, or typing commands straight
+   at the `cfx>` prompt — use `scripts\run-server-console.cmd` instead.
 4. Open the FiveM client and connect to `127.0.0.1:30120`.
 5. In the in-game console / chat, run `/test_m1`.
 
@@ -91,6 +101,7 @@ ownership-migration regression fails the build rather than surfacing mid-session
 | `/coords` | client→server | Dump caster coords+heading to `coords_dump.json` (the coord dumper). |
 | `/test_m1` | server | `mo_clear` → spawn A+B → `mo_engage` → after 90s print `/mo_status`. |
 | `/test_pool <n>` | server | Spawn `n` faction-A peds in a grid; print count every 10s (T2 helper). |
+| `scripts\run-server-console.cmd` | shell | Run FXServer in the current console window with live streaming output and a usable `cfx>` prompt (bypasses ACE); see the smoke-test caveat above. |
 
 All commands are admin-restricted via `add_ace` in `server/server.cfg`;
 grant yourself admin with `add_principal identifier.fivem:<you> group.admin`.
@@ -121,7 +132,8 @@ grant yourself admin with `add_principal identifier.fivem:<you> group.admin`.
 |---|---|
 | Lua syntax of every `.lua` under `resources/` (`luac5.4 -p`, `scripts/lint-lua.sh`) | **Verified** in this container |
 | Runtime behaviour against mocked natives — spawn, orders, ownership migration, death and corpse cleanup, argument validation, coord dumping, population suppression (`scripts/test-lua.sh`, 14 tests) | **Verified** in this container, against the mock only |
-| Every value tagged `-- VERIFY:` in the resource Lua (combat attribute ids, ability/range/movement enums, dispatch ids, audio flag), and whether server-side `CREATE_PED` takes a leading `pedType` | Unverified — needs the real server |
+| Every value tagged `-- VERIFY:` in the resource Lua (combat attribute ids, ability/range/movement enums, dispatch ids, audio flag) | Unverified — needs the real server |
+| Server-side `CREATE_PED` takes a leading `pedType` argument, as currently called | **Confirmed** on FXServer build 35245 |
 | `runtime.fivem.net` artifact-listing HTML structure that `get-server.ps1` parses | Unverified — container has no network path to `runtime.fivem.net` |
 | `get-server.ps1` download/extract/clone flow | Unverified — never executed (Windows + network required) |
 | `server/server.cfg` values and `ensure` order | Unverified against a running FXServer |
