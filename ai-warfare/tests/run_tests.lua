@@ -116,7 +116,21 @@ local function tickClients(n)
     Mock.advance(CLIENT_TICK * (n or 1) + 10)
 end
 
+--- Give the server audit one pass in which the units are alive.
+--- The server only treats a unit as dead once it has SEEN it alive: a ped no
+--- client has instantiated yet reads health 0 as well, and culling on that is
+--- the production blocker. So a test that kills a ped must first let the audit
+--- latch seenAlive — which any real match does long before its first casualty.
+local function auditSeesAlive()
+    Mock.advance(AUDIT_TICK + 100)
+end
+
 local function reset()
+    -- Restore the instantiation knobs before clearing, so a test that left peds
+    -- un-instantiated (or unqueryable) cannot block /mo_clear.
+    Mock.autoInstantiate           = true
+    Mock.existsBeforeInstantiation = true
+    Mock.bagWriteBlocked           = nil
     Mock.runCommand(server, 'mo_clear')
     -- /mo_clear must leave nothing behind, corpses included. Asserting it here
     -- means any future regression of the corpse leak fails the whole suite
@@ -393,6 +407,7 @@ test('06 a dead ped leaves the registry and the squad bucket; /mo_status still r
     local peds = missionPeds()
     local victim = notNil(pedBySlot(peds, 2), 'slot 2 ped')
     local netId = victim.netId
+    auditSeesAlive()
 
     Mock.clearOutput()
     Mock.setHealth(victim.handle, 0)
@@ -689,6 +704,8 @@ test('13 a corpse evicted by the audit is still deleted by /mo_clear', function(
     Mock.runCommand(server, 'mo_spawn A 5')
     tickClients(1)
 
+    auditSeesAlive()
+
     local victim = notNil(pedBySlot(missionPeds(), 2), 'slot 2 ped')
     Mock.setHealth(victim.handle, 0)
     Mock.advance(AUDIT_TICK + 100)   -- audit evicts it from the registry
@@ -707,6 +724,8 @@ test('14 a corpse is reaped automatically once Config.CorpseLingerMs elapses', f
     Mock.runCommand(server, 'mo_spawn A 5')
     tickClients(1)
 
+    auditSeesAlive()
+
     local victim = notNil(pedBySlot(missionPeds(), 2), 'slot 2 ped')
     Mock.setHealth(victim.handle, 0)
     Mock.advance(AUDIT_TICK + 100)
@@ -724,6 +743,237 @@ test('14 a corpse is reaped automatically once Config.CorpseLingerMs elapses', f
     ok(not Mock.pedExists(victim.handle),
         'the audit must delete the body once the linger window has passed')
     noErrors('corpse reaping')
+end)
+
+-- ===========================================================================
+-- 15. Spawn with nobody in scope — the production blocker (build 35245, OneSync)
+-- ===========================================================================
+
+-- On the real server every unit of /test_m1 was culled in its own creation
+-- frame ("dead or missing at order time") and /mo_engage then reported
+-- "0 squad(s), 0 unit(s)". A server-created ped is not instantiated until a
+-- client pulls it in, so it reads health 0 (and possibly non-existent) first.
+test('15 spawn with no client in scope registers and orders every unit anyway', function()
+    reset()
+    Mock.autoInstantiate = false                 -- no client ever comes into scope
+    Mock.runCommand(server, 'mo_spawn A 5')
+    noErrors('mo_spawn with no client in scope')
+
+    local peds = missionPeds()
+    eq(#peds, 5, 'ped count')
+    for _, p in ipairs(peds) do
+        ok(not Mock.isInstantiated(p.handle), 'fixture: ped %s must still be un-instantiated', p.handle)
+        eq(server.GetEntityHealth(p.handle), 0, 'fixture: an un-instantiated ped reads health 0')
+    end
+
+    -- The production signature: the registry entry deleted in the creation frame.
+    ok(not Mock.outputMatches('removed from registry'),
+        'no unit may be culled in its own creation frame\n--- output ---\n%s', Mock.outputText())
+
+    for _, p in ipairs(peds) do
+        local mo = notNil(Mock.getState(p.handle, 'mo'), 'mo bag for ped ' .. p.handle)
+        eq(mo.t, 'hold', 'initial order type')
+        ok(Mock.isReplicated(p.handle, 'mo'), 'mo must be written replicated=true')
+    end
+
+    Mock.clearOutput()
+    Mock.runCommand(server, 'mo_status')
+    outputHas('squad A/1  alive=0/5', 'mo_status must show 5 registered, none alive yet')
+
+    Mock.clearOutput()
+    Mock.runCommand(server, 'mo_engage')
+    outputHas('attack%-move issued to 1 squad%(s%), 5 unit%(s%)',
+        'mo_engage must still find the squad (production reported 0 squad(s), 0 unit(s))')
+    noErrors('mo_engage')
+end)
+
+-- ===========================================================================
+-- 16. ...and they start acting the moment a client instantiates them
+-- ===========================================================================
+
+test('16 units spawned with nobody in scope start acting once a client instantiates them', function()
+    reset()
+    Mock.autoInstantiate = false
+    Mock.runCommand(server, 'mo_spawn A 5')
+    local peds = missionPeds()
+    eq(#peds, 5, 'ped count')
+
+    -- Nothing can be tasked while no client holds the ped.
+    tickClients(2)
+    for _, p in ipairs(peds) do
+        eq(countFor('client1', 'TaskGuardCurrentPosition', p.handle), 0,
+            'an un-instantiated ped must not be tasked')
+    end
+    ok(not Mock.outputMatches('removed from registry'),
+        'no unit may be culled while it is merely waiting to be instantiated\n%s', Mock.outputText())
+
+    -- A client comes into scope.
+    Mock.instantiateAll()
+    Mock.clearOutput()
+    tickClients(1)
+
+    for _, p in ipairs(peds) do
+        eq(countFor('client1', 'TaskGuardCurrentPosition', p.handle), 1,
+            'hold applied for ped ' .. p.handle .. ' once instantiated')
+        eq(countFor('client1', 'TaskCombatHatedTargetsAroundPed', p.handle), 1,
+            'hold pair applied for ped ' .. p.handle)
+    end
+
+    Mock.advance(AUDIT_TICK + 100)
+    Mock.clearOutput()
+    Mock.runCommand(server, 'mo_status')
+    outputHas('squad A/1  alive=5/5', 'all five must now be alive')
+    noErrors('late instantiation')
+end)
+
+-- ===========================================================================
+-- 17. A ped nobody ever instantiates is reaped, not leaked
+-- ===========================================================================
+
+test('17 a unit that never instantiates is culled after Config.SpawnGraceMs and its entity deleted', function()
+    reset()
+    local grace = tonumber(Config.SpawnGraceMs) or 0
+    ok(grace > 0, 'Config.SpawnGraceMs must be a positive duration')
+
+    Mock.autoInstantiate = false
+    Mock.runCommand(server, 'mo_spawn A 3')
+    local peds = missionPeds()
+    eq(#peds, 3, 'ped count')
+
+    -- Still registered halfway through the window.
+    Mock.advance(grace / 2)
+    ok(not Mock.outputMatches('removed from registry'),
+        'a unit inside its grace window must not be culled\n%s', Mock.outputText())
+
+    Mock.clearOutput()
+    Mock.advance(grace / 2 + AUDIT_TICK * 2)
+    outputHas('no client ever instantiated it', 'the cull must name the likely cause')
+    Mock.runCommand(server, 'mo_status')
+    outputHas('squad A/1  alive=0/0', 'the squad must now be empty, not missing')
+
+    -- ...and the bodies go through the corpse path rather than leaking.
+    for _, p in ipairs(peds) do
+        ok(Mock.pedExists(p.handle), 'the entity is reaped by the corpse path, not dropped on the floor')
+    end
+    Mock.advance((tonumber(Config.CorpseLingerMs) or 0) + AUDIT_TICK * 2)
+    for _, p in ipairs(peds) do
+        ok(not Mock.pedExists(p.handle), 'ped %s leaked: never instantiated and never deleted', p.handle)
+    end
+    eq(#missionPeds(), 0, 'no server-created ped may survive the grace cull')
+    noErrors('grace reaping')
+end)
+
+-- ===========================================================================
+-- 18. The other pre-instantiation variant: DoesEntityExist reads false
+-- ===========================================================================
+
+-- The production report could not tell whether the fresh ped reads health 0 or
+-- non-existent, so both variants must behave.
+test('18 a ped that is not even queryable before instantiation is still registered and ordered', function()
+    reset()
+    Mock.autoInstantiate           = false
+    Mock.existsBeforeInstantiation = false
+    Mock.runCommand(server, 'mo_spawn A 5')
+    noErrors('mo_spawn with unqueryable peds')
+
+    local peds = missionPeds()
+    eq(#peds, 5, 'CreatePed must not be treated as failed')
+    outputHas('not queryable in its creation frame', 'the condition must be reported, not silently swallowed')
+    ok(not Mock.outputMatches('removed from registry'), 'no cull in the creation frame\n%s', Mock.outputText())
+
+    for _, p in ipairs(peds) do
+        local mo = notNil(Mock.getState(p.handle, 'mo'), 'mo bag for ped ' .. p.handle)
+        eq(mo.t, 'hold', 'initial order type')
+    end
+
+    Mock.clearOutput()
+    Mock.runCommand(server, 'mo_engage')
+    outputHas('attack%-move issued to 1 squad%(s%), 5 unit%(s%)', 'mo_engage must find the squad')
+
+    -- A client arrives: the units become alive and are never culled.
+    Mock.existsBeforeInstantiation = true
+    Mock.instantiateAll()
+    Mock.advance(AUDIT_TICK + 100)
+    Mock.clearOutput()
+    Mock.runCommand(server, 'mo_status')
+    outputHas('squad A/1  alive=5/5', 'all five alive after instantiation')
+    noErrors('unqueryable variant')
+end)
+
+-- ===========================================================================
+-- 19. /mo_status tells "no squads" apart from "squads with nothing left alive"
+-- ===========================================================================
+
+test('19 /mo_status distinguishes no squads from a squad whose units were all culled', function()
+    reset()
+    Mock.runCommand(server, 'mo_status')
+    outputHas('no squads registered', 'an empty registry must say so')
+
+    Mock.clearOutput()
+    Mock.runCommand(server, 'mo_spawn A 3')
+    tickClients(1)
+    auditSeesAlive()
+    for _, p in ipairs(missionPeds()) do Mock.setHealth(p.handle, 0) end
+    Mock.advance(AUDIT_TICK + 100)
+
+    Mock.clearOutput()
+    Mock.runCommand(server, 'mo_status')
+    outputHas('squad A/1  alive=0/0', 'a wiped-out squad must still be listed')
+    outputHas('totals: 1 squad%(s%), 0 unit%(s%) registered, 0 alive', 'totals line')
+    ok(not Mock.outputMatches('no squads registered'),
+        '"no squads registered" must not be printed while squad A/1 exists\n%s', Mock.outputText())
+
+    -- mo_engage keeps the skip-empty behaviour: there is nothing to order.
+    Mock.clearOutput()
+    Mock.runCommand(server, 'mo_engage')
+    outputHas('issued to 0 squad%(s%), 0 unit%(s%)', 'mo_engage must skip the empty bucket')
+    noErrors('status reporting')
+end)
+
+-- ===========================================================================
+-- 20. Self-heal: a unit left without an order gets one from the audit
+-- ===========================================================================
+
+test('20 the audit re-applies hold to a unit whose initial state-bag write failed', function()
+    reset()
+    -- The `mo` write is the one that can fail against a not-yet-instantiated
+    -- entity; `mu` is left alone so the unit is still identifiable.
+    Mock.bagWriteBlocked = function(_, key) return key == 'mo' end
+    Mock.runCommand(server, 'mo_spawn A 2')
+    noErrors('mo_spawn with a failing state bag')
+
+    local peds = missionPeds()
+    eq(#peds, 2, 'ped count')
+    for _, p in ipairs(peds) do
+        ok(Mock.getState(p.handle, 'mo') == nil, 'fixture: the mo write must have failed')
+    end
+    outputHas('state bag write failed', 'the failed write must be reported')
+    outputHas('initial hold not published', 'the spawn report must admit the unit has no order')
+    outputHas('registered unit%(s%) have no order yet', 'the spawn summary must not claim success')
+
+    Mock.bagWriteBlocked = nil
+    Mock.clearOutput()
+    -- Clear the call log BEFORE the window, never inside it: the audit pass that
+    -- re-applies the order and the client tick that acts on it can land in the
+    -- same window, and mission-ai deliberately applies a given seq only once
+    -- (tests 04/05), so a log cleared in between would erase the only evidence
+    -- and the next tick would legitimately show nothing.
+    Mock.clearLog()
+    -- Peds instantiate, the audit notices the missing order and retries it, and
+    -- the owning client applies what the audit published.
+    Mock.advance(AUDIT_TICK * 2 + CLIENT_TICK * 2)
+    outputHas('re%-applied hold', 'the audit must retry the missing order')
+
+    for _, p in ipairs(peds) do
+        local mo = notNil(Mock.getState(p.handle, 'mo'), 'mo bag for ped ' .. p.handle)
+        eq(mo.t, 'hold', 'self-healed order type')
+    end
+
+    for _, p in ipairs(peds) do
+        eq(countFor('client1', 'TaskGuardCurrentPosition', p.handle), 1,
+            'the self-healed hold must reach the owning client exactly once')
+    end
+    noErrors('self-heal')
 end)
 
 -- Real-server-only behaviour this harness deliberately cannot model:

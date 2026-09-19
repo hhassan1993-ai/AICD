@@ -106,19 +106,45 @@ end
 -- Entity helpers (every native call is guarded by DoesEntityExist)
 -- ---------------------------------------------------------------------------
 
+--- "Alive" here means POSITIVELY alive: the entity is queryable AND reports
+--- health. A freshly created server-side ped reports neither until a client
+--- instantiates it, so `not entityAlive(ped)` does NOT mean "dead" — see
+--- observeAlive / u.seenAlive below. Never cull on this alone.
 local function entityAlive(ped)
     if type(ped) ~= 'number' or ped == 0 then return false end
     if not DoesEntityExist(ped) then return false end
     return GetEntityHealth(ped) > 0
 end
 
---- Audit passes a body waits before deletion, from Config.CorpseLingerMs.
-local function corpseTicks()
+--- Latch: a unit is only ever treated as *dead* once it has been seen alive.
+--- @return boolean alive right now
+local function observeAlive(u)
+    if type(u) ~= 'table' then return false end
+    if entityAlive(u.ped) then
+        u.seenAlive = true
+        return true
+    end
+    return false
+end
+
+local function auditInterval()
     local interval = tonumber(Config.Tick and Config.Tick.serverAuditMs) or 1000
     if interval < 100 then interval = 100 end
+    return interval
+end
+
+--- Audit passes a body waits before deletion, from Config.CorpseLingerMs.
+local function corpseTicks()
     local linger = tonumber(Config.CorpseLingerMs) or 0
     if linger <= 0 then return 0 end
-    return math.ceil(linger / interval)
+    return math.ceil(linger / auditInterval())
+end
+
+--- Audit passes a unit may stay "not alive yet", from Config.SpawnGraceMs.
+local function spawnGraceTicks()
+    local grace = tonumber(Config.SpawnGraceMs) or 15000
+    if grace <= 0 then return 0 end
+    return math.ceil(grace / auditInterval())
 end
 
 local function forgetUnit(netId, reason)
@@ -126,8 +152,14 @@ local function forgetUnit(netId, reason)
     if not u then return end
     units[netId] = nil
     -- Keep the body reachable so it is still deleted later (or by /mo_clear).
-    if type(u.ped) == 'number' and u.ped ~= 0 and DoesEntityExist(u.ped) then
-        corpses[#corpses + 1] = { ped = u.ped, ticks = corpseTicks() }
+    -- A unit that was never seen alive may also never have been queryable, so
+    -- its handle is kept with force=true: the reaper must delete it regardless
+    -- of what DoesEntityExist says, or the ped-pool slot leaks for the session.
+    if type(u.ped) == 'number' and u.ped ~= 0 then
+        local force = not u.seenAlive
+        if force or DoesEntityExist(u.ped) then
+            corpses[#corpses + 1] = { ped = u.ped, ticks = corpseTicks(), force = force }
+        end
     end
     local bucket = squads[u.f] and squads[u.f][u.sq]
     if bucket then
@@ -144,16 +176,21 @@ end
 
 local VALID_ORDERS = { hold = true, move = true, amove = true, retreat = true }
 
---- Write one order onto one unit. `order` is copied per-unit so `slot` differs.
-local function setUnitOrder(netId, t, x, y, z)
+--- Write one order onto one unit WITHOUT any liveness gate. `order` is copied
+--- per-unit so `slot` differs.
+---
+--- The gate deliberately lives in setUnitOrder, not here: the initial `hold` is
+--- issued in the ped's creation frame, when the ped is not yet instantiated by
+--- any client and therefore reads as health 0 / possibly non-existent. Routing
+--- that first order through the gate culled every unit the instant it was
+--- registered (build 35245). Publishing is safe regardless: the order lives in
+--- the state bag and the owning client applies it when it does instantiate.
+--- @return boolean published
+local function publishOrder(netId, t, x, y, z)
     local u = units[netId]
     if not u then return false end
     if not VALID_ORDERS[t] then
-        warn('setUnitOrder: unknown order type %s', tostring(t))
-        return false
-    end
-    if not entityAlive(u.ped) then
-        forgetUnit(netId, 'dead or missing at order time')
+        warn('publishOrder: unknown order type %s', tostring(t))
         return false
     end
 
@@ -182,6 +219,23 @@ local function setUnitOrder(netId, t, x, y, z)
     return true
 end
 
+--- Order one unit, culling it if it is KNOWN to be dead: known means it was
+--- seen alive at some point and is not alive now. A unit that has never been
+--- seen alive is still waiting to be instantiated, which is not death.
+local function setUnitOrder(netId, t, x, y, z)
+    local u = units[netId]
+    if not u then return false end
+    if not VALID_ORDERS[t] then
+        warn('setUnitOrder: unknown order type %s', tostring(t))
+        return false
+    end
+    if not observeAlive(u) and u.seenAlive then
+        forgetUnit(netId, 'dead or missing at order time')
+        return false
+    end
+    return publishOrder(netId, t, x, y, z)
+end
+
 --- Order a whole squad. @return integer applied, integer total
 local function setSquadOrder(f, sq, t, x, y, z)
     local bucket = squads[f] and squads[f][sq]
@@ -197,10 +251,19 @@ local function setSquadOrder(f, sq, t, x, y, z)
     return applied, total
 end
 
-local function forEachSquad(fn)
+--- Visit every squad bucket. Empty buckets are skipped unless `includeEmpty` is
+--- true: ordering commands have nothing to say to an empty squad, but reporting
+--- commands must still say "this squad exists and has nothing left in it" —
+--- otherwise a wiped-out (or never-registered) squad is indistinguishable from
+--- no squad at all, which is how the spawn bug hid for a whole test session.
+local function forEachSquad(fn, includeEmpty)
     for _, f in ipairs({ 'A', 'B' }) do
-        for sq, bucket in pairs(squads[f]) do
-            if #bucket > 0 then fn(f, sq, bucket) end
+        local ids = {}
+        for sq in pairs(squads[f]) do ids[#ids + 1] = sq end
+        table.sort(ids)
+        for i = 1, #ids do
+            local bucket = squads[f][ids[i]]
+            if includeEmpty or #bucket > 0 then fn(f, ids[i], bucket) end
         end
     end
 end
@@ -230,19 +293,30 @@ local function spawnSquad(faction, count)
     nextSquadId[faction] = sq + 1
     squads[faction][sq] = {}
 
-    local spawned = 0
+    local created = 0
     for slot = 0, count - 1 do
         local modelName = fac.models[(slot % #fac.models) + 1]
         local ox, oy = Config.FormationSlotOffset(slot, spawn.w)
 
-        -- VERIFY: server-side CreatePed takes a pedType first argument
-        -- (CREATE_PED(int pedType, Hash modelHash, ...)); the spec's 7-arg form
-        -- omits it. 4 = PED_TYPE_CIVMALE. Confirm against docs.fivem.net.
+        -- CONFIRMED on FXServer build 35245 (2026-09-19, docs/T1-BLOCKER-mission-core.md):
+        -- server-side CREATE_PED does take a leading pedType and this call is
+        -- correct. 10/10 peds created. 4 = PED_TYPE_CIVMALE.
         local ped = CreatePed(4, GetHashKey(modelName), spawn.x + ox, spawn.y + oy, spawn.z, spawn.w + 0.0, true, true)
 
-        if type(ped) ~= 'number' or ped == 0 or not DoesEntityExist(ped) then
+        if type(ped) ~= 'number' or ped == 0 then
             warn('CreatePed failed for %s (faction %s, slot %d)', tostring(modelName), faction, slot)
         else
+            -- A non-zero handle means the ped was created. It is NOT necessarily
+            -- queryable in this frame — an entity no client has instantiated can
+            -- read back as non-existent — so a false DoesEntityExist here is
+            -- reported and ignored, not treated as a failed spawn. If the ped
+            -- really never comes up, the spawn grace window reaps it.
+            if not DoesEntityExist(ped) then
+                log('ped %s (faction %s slot %d) is not queryable in its creation frame — registering anyway',
+                    tostring(ped), faction, slot)
+            end
+            created = created + 1
+
             local weaponName = (type(fac.weapons) == 'table' and #fac.weapons > 0)
                 and fac.weapons[(slot % #fac.weapons) + 1] or nil
             if weaponName then
@@ -263,30 +337,53 @@ local function spawnSquad(faction, count)
                 end
 
                 units[netId] = {
-                    ped   = ped,
-                    f     = faction,
-                    sq    = sq,
-                    slot  = slot,
-                    order = nil,
-                    seq   = 0,
-                    owner = NetworkGetEntityOwner(ped),
+                    ped        = ped,
+                    f          = faction,
+                    sq         = sq,
+                    slot       = slot,
+                    order      = nil,
+                    seq        = 0,
+                    owner      = NetworkGetEntityOwner(ped),
+                    seenAlive  = false,
+                    graceTicks = spawnGraceTicks(),
                 }
                 squads[faction][sq][#squads[faction][sq] + 1] = netId
-                setUnitOrder(netId, 'hold')
-                spawned = spawned + 1
+                -- Publish directly: the aliveness gate must never see this one.
+                if not publishOrder(netId, 'hold') then
+                    warn('initial hold not published for netId %s — the audit will retry', netId)
+                end
             end
         end
     end
 
-    log('spawned squad %s/%d — %d/%d peds at (%.2f, %.2f, %.2f h=%.1f)',
-        faction, sq, spawned, count, spawn.x, spawn.y, spawn.z, spawn.w)
-    return sq, spawned
+    -- Report what actually survived, not what was attempted: a unit only counts
+    -- when it is still in the registry AND carries an order. `alive` is separate
+    -- because peds normally instantiate a frame or more after they are created,
+    -- so 0 alive right here is expected, not a failure.
+    local bucket = squads[faction][sq]
+    local registered, ordered, alive = #bucket, 0, 0
+    for i = 1, #bucket do
+        local u = units[bucket[i]]
+        if u then
+            if u.order then ordered = ordered + 1 end
+            if observeAlive(u) then alive = alive + 1 end
+        end
+    end
+
+    log('spawned squad %s/%d — %d/%d peds created, %d registered, %d ordered, %d alive so far at (%.2f, %.2f, %.2f h=%.1f)',
+        faction, sq, created, count, registered, ordered, alive, spawn.x, spawn.y, spawn.z, spawn.w)
+    if ordered < registered then
+        warn('squad %s/%d: %d registered unit(s) have no order yet', faction, sq, registered - ordered)
+    end
+    return sq, ordered
 end
 
 local function clearAll()
     local removed = 0
     for netId, u in pairs(units) do
-        if type(u.ped) == 'number' and u.ped ~= 0 and DoesEntityExist(u.ped) then
+        -- A unit that was never seen alive may not be queryable yet; delete it
+        -- anyway rather than leave a ped-pool slot behind.
+        if type(u.ped) == 'number' and u.ped ~= 0 and (DoesEntityExist(u.ped) or not u.seenAlive) then
             DeleteEntity(u.ped)
             removed = removed + 1
         end
@@ -294,7 +391,7 @@ local function clearAll()
     end
     for i = #corpses, 1, -1 do
         local ped = corpses[i].ped
-        if type(ped) == 'number' and ped ~= 0 and DoesEntityExist(ped) then
+        if type(ped) == 'number' and ped ~= 0 and (DoesEntityExist(ped) or corpses[i].force) then
             DeleteEntity(ped)
             removed = removed + 1
         end
@@ -419,22 +516,34 @@ end, true)
 
 RegisterCommand('mo_status', function()
     log('--- status ---------------------------------------------------------')
-    local any = false
+    -- includeEmpty: a squad whose units were all culled must still be listed,
+    -- otherwise "everything died" and "nothing was ever spawned" print the same
+    -- line and the operator cannot tell them apart.
+    local squadCount, registeredTotal, aliveTotal, waitingTotal = 0, 0, 0, 0
     forEachSquad(function(f, sq, bucket)
-        any = true
-        local alive, lines = 0, {}
+        squadCount = squadCount + 1
+        local alive, waiting, lines = 0, 0, {}
         for i = 1, #bucket do
             local netId = bucket[i]
             local u = units[netId]
-            if u and entityAlive(u.ped) then
-                alive = alive + 1
-                local owner = NetworkGetEntityOwner(u.ped)
-                local hp    = GetEntityHealth(u.ped)
-                local c     = GetEntityCoords(u.ped)
-                lines[#lines + 1] = ('    netId=%s slot=%s hp=%s owner=%s pos=(%.1f, %.1f, %.1f)')
-                    :format(netId, u.slot, hp, tostring(owner), c.x, c.y, c.z)
+            if u then
+                registeredTotal = registeredTotal + 1
+                if observeAlive(u) then
+                    alive = alive + 1
+                    local owner = NetworkGetEntityOwner(u.ped)
+                    local hp    = GetEntityHealth(u.ped)
+                    local c     = GetEntityCoords(u.ped)
+                    lines[#lines + 1] = ('    netId=%s slot=%s hp=%s owner=%s pos=(%.1f, %.1f, %.1f)')
+                        :format(netId, u.slot, hp, tostring(owner), c.x, c.y, c.z)
+                else
+                    waiting = waiting + 1
+                    lines[#lines + 1] = ('    netId=%s slot=%s not alive yet (seenAlive=%s, order=%s) — waiting for a client to instantiate it')
+                        :format(netId, u.slot, tostring(u.seenAlive == true), u.order and u.order.t or 'none')
+                end
             end
         end
+        aliveTotal   = aliveTotal + alive
+        waitingTotal = waitingTotal + waiting
         local order = 'none'
         for i = 1, #bucket do
             local u = units[bucket[i]]
@@ -442,8 +551,13 @@ RegisterCommand('mo_status', function()
         end
         log('squad %s/%d  alive=%d/%d  order=%s', f, sq, alive, #bucket, order)
         for i = 1, #lines do print(lines[i]) end
-    end)
-    if not any then log('no squads registered') end
+    end, true)
+    if squadCount == 0 then
+        log('no squads registered')
+    else
+        log('totals: %d squad(s), %d unit(s) registered, %d alive, %d awaiting instantiation',
+            squadCount, registeredTotal, aliveTotal, waitingTotal)
+    end
     log('--------------------------------------------------------------------')
 end, true)
 
@@ -502,7 +616,7 @@ RegisterCommand('test_pool', function(_, args)
     for i = 0, n - 1 do
         local row, col = math.floor(i / perRow), i % perRow
         local modelName = fac.models[(i % #fac.models) + 1]
-        -- VERIFY: pedType argument, as in spawnSquad above.
+        -- pedType argument, as in spawnSquad above (confirmed on build 35245).
         local ped = CreatePed(4, GetHashKey(modelName),
             spawn.x + (col * step), spawn.y + (row * step), spawn.z, spawn.w + 0.0, true, true)
         if type(ped) == 'number' and ped ~= 0 and DoesEntityExist(ped) then
@@ -536,24 +650,50 @@ end, true)
 -- ---------------------------------------------------------------------------
 
 Citizen.CreateThread(function()
-    local interval = tonumber(Config.Tick and Config.Tick.serverAuditMs) or 1000
-    if interval < 100 then interval = 100 end
+    local interval = auditInterval()
     while true do
         Citizen.Wait(interval)
 
         local stale = {}
         for netId, u in pairs(units) do
-            if type(u.ped) ~= 'number' or u.ped == 0 or not DoesEntityExist(u.ped) then
-                stale[#stale + 1] = { netId, 'entity no longer exists' }
-            elseif GetEntityHealth(u.ped) <= 0 then
-                stale[#stale + 1] = { netId, 'health <= 0' }
-            else
+            local exists = type(u.ped) == 'number' and u.ped ~= 0 and DoesEntityExist(u.ped)
+            local hp     = exists and GetEntityHealth(u.ped) or 0
+            if hp > 0 then u.seenAlive = true end
+
+            -- Grace window: counted down from registration, and only ever used
+            -- to decide when a unit that is NOT positively alive may be culled.
+            if (u.graceTicks or 0) > 0 then u.graceTicks = u.graceTicks - 1 end
+            local pastGrace = (u.graceTicks or 0) <= 0
+
+            if exists and hp > 0 then
                 local owner = NetworkGetEntityOwner(u.ped)
                 if owner ~= u.owner then
                     print(('%s [T1] unit %s owner %s -> %s'):format(TAG, netId, tostring(u.owner), tostring(owner)))
                     u.owner = owner
                 end
+                -- Self-heal: the initial hold is published inside a pcall and can
+                -- fail against an entity no client has instantiated yet. A unit
+                -- with no order would otherwise stand around forever.
+                if u.order == nil then
+                    if setUnitOrder(netId, 'hold') then
+                        log('unit %s (%s/%s slot %s) had no order — re-applied hold', netId, u.f, u.sq, u.slot)
+                    else
+                        warn('unit %s (%s/%s slot %s) still has no order after a retry', netId, u.f, u.sq, u.slot)
+                    end
+                end
+            elseif u.seenAlive and exists then
+                -- Seen alive before, queryable, no health left: genuinely dead.
+                stale[#stale + 1] = { netId, 'health <= 0' }
+            elseif pastGrace then
+                if not u.seenAlive then
+                    stale[#stale + 1] = { netId, ('never became alive within %d ms of spawn — most likely no client ever instantiated it (nobody in scope of the spawn point)')
+                        :format(tonumber(Config.SpawnGraceMs) or 15000) }
+                else
+                    stale[#stale + 1] = { netId, 'entity no longer exists' }
+                end
             end
+            -- Otherwise: not alive yet, still inside the grace window. Leave it
+            -- alone — "not instantiated" is not "dead".
         end
 
         for i = 1, #stale do
@@ -563,10 +703,14 @@ Citizen.CreateThread(function()
         -- Reap bodies whose linger time has elapsed.
         for i = #corpses, 1, -1 do
             local c = corpses[i]
-            if type(c.ped) ~= 'number' or c.ped == 0 or not DoesEntityExist(c.ped) then
+            if type(c.ped) ~= 'number' or c.ped == 0 then
                 table.remove(corpses, i)
             elseif c.ticks <= 0 then
-                DeleteEntity(c.ped)
+                -- force: the ped never instantiated, so DoesEntityExist cannot be
+                -- trusted to say whether there is still something to delete.
+                if c.force or DoesEntityExist(c.ped) then DeleteEntity(c.ped) end
+                table.remove(corpses, i)
+            elseif not c.force and not DoesEntityExist(c.ped) then
                 table.remove(corpses, i)
             else
                 c.ticks = c.ticks - 1

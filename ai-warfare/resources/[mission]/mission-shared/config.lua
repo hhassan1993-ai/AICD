@@ -43,6 +43,16 @@ Config.Tick = {
 -- next audit pass; raise it if the footage needs longer-lived casualties.
 Config.CorpseLingerMs = 60000
 
+-- How long a freshly spawned unit may stay "not alive yet" before the server
+-- gives up on it. A server-created ped is NOT instantiated until some client
+-- comes into scope and pulls it in; until then GetEntityHealth reads 0 and
+-- DoesEntityExist may read false, so the server must NOT mistake that for death
+-- (that bug culled every unit in its own creation frame on build 35245). The
+-- window is bounded so a ped nobody ever instantiates — e.g. a spawn point no
+-- player goes near — is still reaped instead of leaking a ped-pool slot.
+-- Measured from registration, counted in server audit passes.
+Config.SpawnGraceMs = 15000
+
 -- PLACEHOLDER coordinates (unverified). Replace with /coords dumper output before first session.
 Config.Spawns = {
     A = vector4(1700.0, 3250.0, 41.0, 200.0),

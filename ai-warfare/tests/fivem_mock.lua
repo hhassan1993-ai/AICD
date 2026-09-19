@@ -15,6 +15,17 @@
     looks like a native (leading capital) becomes a function that errors with its
     own name, so the harness tells you exactly what is missing.
   * Virtual clock only. A 90 s in-game Wait() completes in microseconds.
+  * Instantiation is modelled. A ped created server-side is NOT instantiated in
+    its creation frame: no client holds it yet, so `GetEntityHealth` reads 0,
+    `IsPedDeadOrDying` reads true, the ped is absent from every client's
+    `GetGamePool('CPed')`, and `DoesEntityExist` reads whatever
+    `Mock.existsBeforeInstantiation` says (true by default — the real server was
+    observed registering the ped, so the handle is queryable; flip it to false to
+    exercise the other variant). `Mock.autoInstantiate` (default true) then
+    instantiates the ped on the first clock advance past its creation frame,
+    which is "a client is in scope and pulls it in". Set it to false to model a
+    spawn point no client ever reaches, and call `Mock.instantiatePed` /
+    `Mock.instantiateAll` to bring peds in by hand.
 ===========================================================================]]
 
 local Mock = {}
@@ -272,7 +283,12 @@ function Mock.advance(ms)
         end
         if not nextWake or nextWake > target then break end
 
-        if nextWake > clock then clock = nextWake end
+        if nextWake > clock then
+            clock = nextWake
+            -- A new frame started: peds created in an earlier frame can now be
+            -- instantiated by a client in scope. Defined further down the file.
+            if Mock.autoInstantiateDue then Mock.autoInstantiateDue() end
+        end
 
         local snapshot = {}
         for i = 1, #threads do snapshot[i] = threads[i] end
@@ -287,7 +303,9 @@ function Mock.advance(ms)
             end
         end
     end
+    local moved = target > clock
     clock = target
+    if moved and Mock.autoInstantiateDue then Mock.autoInstantiateDue() end
 end
 
 --- Run every thread that is due right now without moving the clock forward.
@@ -308,6 +326,12 @@ Mock.world         = world
 Mock.defaultOwner  = 1   -- server id of the client that owns freshly created peds
 Mock.groundZFor    = function(_, _, z) return true, z - 1.0 end  -- no snap by default
 
+--- Instantiation model (see the header). Both knobs are global to the world and
+--- are reset per test by run_tests.lua's reset().
+Mock.autoInstantiate           = true   -- a client pulls peds in one frame after creation
+Mock.existsBeforeInstantiation = true   -- DoesEntityExist for a not-yet-instantiated ped
+Mock.spawnHealth               = 200    -- health a ped gets the moment it instantiates
+
 local function newPed(ctx, model, x, y, z, heading)
     world.nextHandle = world.nextHandle + 1
     world.nextNetId  = world.nextNetId + 1
@@ -317,7 +341,10 @@ local function newPed(ctx, model, x, y, z, heading)
         model    = model,
         coords   = vector3(x, y, z),
         heading  = (tonumber(heading) or 0.0) + 0.0,
-        health   = 200,
+        -- Not instantiated yet: no client owns the model, so health reads 0.
+        health   = 0,
+        instantiated = false,
+        createdAt = clock,
         armour   = 0,
         owner    = Mock.defaultOwner,
         exists   = true,
@@ -350,10 +377,49 @@ Mock.newPed     = newPed
 Mock.pedOf      = pedOf
 Mock.destroyPed = destroyPed
 
---- True while the ped is still in the world (not deleted).
+--- True while the ped is still in the world (not deleted). Unlike the
+--- DoesEntityExist native this ignores instantiation: it answers "is this ped
+--- still holding a pool slot", which is what the leak tests need to know.
 function Mock.pedExists(handle)
     return pedOf(handle) ~= nil
 end
+
+--- A client came into scope and instantiated this ped: it now has real health
+--- and shows up in GetGamePool('CPed'). Idempotent, so a ped that instantiated
+--- and was then killed is not resurrected.
+function Mock.instantiatePed(handle)
+    local p = world.peds[handle]
+    assert(p, 'Mock.instantiatePed: no such ped ' .. tostring(handle))
+    if p.instantiated then return p end
+    p.instantiated = true
+    if p.health <= 0 then p.health = Mock.spawnHealth end
+    return p
+end
+
+--- Instantiate every ped still in the world.
+function Mock.instantiateAll()
+    for i = 1, #world.pedOrder do
+        Mock.instantiatePed(world.pedOrder[i])
+    end
+end
+
+--- True once a client has instantiated this ped.
+function Mock.isInstantiated(handle)
+    local p = pedOf(handle)
+    return p ~= nil and p.instantiated == true
+end
+
+--- Instantiate every ped created in an earlier frame ("a client is in scope").
+local function autoInstantiateDue()
+    if not Mock.autoInstantiate then return end
+    for i = 1, #world.pedOrder do
+        local p = world.peds[world.pedOrder[i]]
+        if p and not p.instantiated and p.createdAt < clock then
+            Mock.instantiatePed(p.handle)
+        end
+    end
+end
+Mock.autoInstantiateDue = autoInstantiateDue
 
 function Mock.livePeds()
     local out = {}
@@ -407,10 +473,18 @@ local function deepCopy(v, seen)
 end
 Mock.deepCopy = deepCopy
 
+--- Optional hook: `Mock.bagWriteBlocked(handle, key)` returning true makes that
+--- state-bag write raise, the way a write to a not-yet-instantiated entity can.
+--- The engine wraps every write in pcall, so this exercises the failure branch.
+Mock.bagWriteBlocked = nil
+
 local bagMeta = {}
 bagMeta.__index = function(self, k)
     if k == 'set' then
         return function(bag, key, value, replicated)
+            if Mock.bagWriteBlocked and Mock.bagWriteBlocked(bag.__handle, key) then
+                error(('state bag write refused for entity %s key %q'):format(tostring(bag.__handle), tostring(key)), 2)
+            end
             local store = bagStore[bag.__handle]
             if not store then
                 store = {}
@@ -654,10 +728,18 @@ function Mock.makeEnv(name, opts)
             error('CreatePed: server-side CREATE_PED expects a leading pedType (got ' .. type(pedType) .. ')', 2)
         end
         local p = newPed(name, model, x, y, z, heading)
+        -- A client-created ped is instantiated on the machine that made it; a
+        -- server-created one is not instantiated until a client pulls it in.
+        if side ~= 'server' then Mock.instantiatePed(p.handle) end
         return p.handle
     end
 
-    env.DoesEntityExist = function(h) return pedOf(h) ~= nil end
+    env.DoesEntityExist = function(h)
+        local p = pedOf(h)
+        if not p then return false end
+        if not p.instantiated and not Mock.existsBeforeInstantiation then return false end
+        return true
+    end
 
     env.DeleteEntity = function(h)
         record(name, 'DeleteEntity', h)
@@ -673,6 +755,9 @@ function Mock.makeEnv(name, opts)
     env.GetEntityHealth = function(h)
         local p = pedOf(h)
         if not p then return 0 end
+        -- Not instantiated: no client holds the model, so there is no health to
+        -- report. This is the production blocker's likeliest shape.
+        if not p.instantiated then return 0 end
         return p.health
     end
 
@@ -697,6 +782,7 @@ function Mock.makeEnv(name, opts)
     env.IsPedDeadOrDying = function(h)
         local p = pedOf(h)
         if not p then return true end
+        if not p.instantiated then return true end
         return p.health <= 0
     end
 
@@ -704,8 +790,12 @@ function Mock.makeEnv(name, opts)
         if poolName ~= 'CPed' then
             error(('unimplemented native: GetGamePool(%q)'):format(tostring(poolName)), 2)
         end
+        -- Only instantiated peds are in a client's ped pool.
         local out = {}
-        for i = 1, #world.pedOrder do out[i] = world.pedOrder[i] end
+        for i = 1, #world.pedOrder do
+            local p = world.peds[world.pedOrder[i]]
+            if p and p.instantiated then out[#out + 1] = p.handle end
+        end
         return out
     end
 
@@ -792,6 +882,7 @@ function Mock.makeEnv(name, opts)
         if side == 'server' then error('PlayerPedId is a client native', 2) end
         if not env.__playerPed then
             local p = newPed(name .. ':player', 'mp_m_freemode_01', 0.0, 0.0, 0.0, 0.0)
+            Mock.instantiatePed(p.handle)   -- a player's own ped is always instantiated
             env.__playerPed = p.handle
         end
         return env.__playerPed
